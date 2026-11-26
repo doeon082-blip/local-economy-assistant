@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# backend/src/economy_assistant/config.py → 저장소 루트(.env, .local_data 위치)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LOCAL_DATA_DIR = PROJECT_ROOT / ".local_data"
 VECTOR_DIR = LOCAL_DATA_DIR / "vector_store"
 DB_PATH = LOCAL_DATA_DIR / "ecos_statistics.sqlite3"

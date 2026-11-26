@@ -39,7 +39,7 @@ policy = SecurityPolicy(
     allow_data_changes=True,
 )
 MAX_HISTORY_CHARS = 24000
-frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+frontend_dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
 def get_store() -> VectorStore:

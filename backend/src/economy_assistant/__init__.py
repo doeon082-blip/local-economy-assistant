@@ -24,7 +24,7 @@ def _find_node_executable(frontend_dir: Path) -> str | None:
 
 
 def _run_dev(host: str, port: int) -> None:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[3]
     frontend_dir = project_root / "frontend"
     vite_entry = frontend_dir / "node_modules" / "vite" / "bin" / "vite.js"
     node_exe = _find_node_executable(frontend_dir)

@@ -17,11 +17,12 @@ ENV UV_COMPILE_BYTECODE=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
+WORKDIR /app/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+COPY backend/src ./src
 RUN uv sync --frozen --no-dev
 
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && mkdir -p /app/.local_data/vector_store \
@@ -29,7 +30,7 @@ RUN useradd --create-home --shell /bin/bash appuser \
 
 USER appuser
 
-ENV PATH="/app/.venv/bin:$PATH" \
+ENV PATH="/app/backend/.venv/bin:$PATH" \
     ALLOW_REMOTE_ACCESS=true \
     ALLOW_REMOTE_OLLAMA=true \
     HOST=0.0.0.0 \
