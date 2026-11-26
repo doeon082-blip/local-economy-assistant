@@ -1,7 +1,7 @@
 """FastAPI backend; supports local loopback mode, streaming chat, and batch ECOS sync."""
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 import json
 from pathlib import Path
@@ -38,6 +38,7 @@ policy = SecurityPolicy(
     allow_external_sends=True,
     allow_data_changes=True,
 )
+MAX_HISTORY_CHARS = 24000
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
@@ -141,22 +142,31 @@ def list_observations(stat_code: str = Query(default="", max_length=32), limit: 
     return {"count": len(rows), "observations": rows}
 
 
-@app.post("/api/chat")
-def chat(request: ChatRequest):
+def _validated_question(request: ChatRequest) -> str:
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="질문을 입력해 주세요.")
+    if sum(len(item.get("content", "")) for item in request.history) > MAX_HISTORY_CHARS:
+        raise HTTPException(status_code=422, detail="대화 이력이 너무 깁니다. 새 대화를 시작해 주세요.")
+    require_allowed(ActionRequest("local_ollama_chat"), policy)
+    return question
+
+
+@contextmanager
+def _chat_errors():
     try:
-        if sum(len(item.get("content", "")) for item in request.history) > 24000:
-            raise HTTPException(status_code=422, detail="대화 이력이 너무 깁니다. 새 대화를 시작해 주세요.")
-        require_allowed(ActionRequest("local_ollama_chat"), policy)
-        return answer(question, request.history, get_store(), get_db())
+        yield
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except OllamaError as exc:
+    except (OllamaError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/chat")
+def chat(request: ChatRequest):
+    with _chat_errors():
+        question = _validated_question(request)
+        return answer(question, request.history, get_store(), get_db())
 
 
 def _stream_ndjson(citations: list[dict[str, str]], token_iter):
@@ -171,20 +181,9 @@ def _stream_ndjson(citations: list[dict[str, str]], token_iter):
 
 @app.post("/api/chat/stream")
 def chat_stream_endpoint(request: ChatRequest):
-    question = request.question.strip()
-    if not question:
-        raise HTTPException(status_code=422, detail="질문을 입력해 주세요.")
-    try:
-        if sum(len(item.get("content", "")) for item in request.history) > 24000:
-            raise HTTPException(status_code=422, detail="대화 이력이 너무 깁니다. 새 대화를 시작해 주세요.")
-        require_allowed(ActionRequest("local_ollama_chat"), policy)
+    with _chat_errors():
+        question = _validated_question(request)
         citations, token_iter = answer_stream(question, request.history, get_store(), get_db())
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except OllamaError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return StreamingResponse(
         _stream_ndjson(citations, token_iter),
