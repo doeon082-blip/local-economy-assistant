@@ -127,3 +127,8 @@ def ecos_api_key() -> str:
 
 def sync_admin_key() -> str:
     return os.environ.get("SYNC_ADMIN_KEY", "").strip()
+
+
+def rate_limit_per_minute() -> int:
+    """Per-client POST limit for chat/sync. 0 disables limiting."""
+    return _env_int("RATE_LIMIT_PER_MINUTE", 60, 0, 100000)

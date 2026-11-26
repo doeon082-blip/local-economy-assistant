@@ -171,6 +171,9 @@ export default function App() {
   }
 
   function resolveApprovalToken() {
+    if (status?.sync_enabled === false) {
+      throw new Error('이 서버는 SYNC_ADMIN_KEY가 설정되지 않아 ECOS 동기화가 비활성화되어 있습니다.');
+    }
     const token = status?.sync_requires_key ? syncKey.trim() : status?.approval_token;
     if (!token) {
       throw new Error(

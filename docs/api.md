@@ -22,7 +22,7 @@
 }
 ```
 
-`question`은 1~8,000자, `history`는 최대 12개입니다.
+`question`은 1~8,000자, `history`는 최대 12개이며 각 항목의 `role`은 `user` 또는 `assistant`만 허용하고 `content`는 8,000자까지입니다(그 외는 422).
 
 ### 스트리밍 응답 형식
 
@@ -39,7 +39,10 @@
 
 ### 동기화 요청
 
-`X-Local-Approval` 헤더에 승인 토큰(`/api/status`의 `approval_token`) 또는 `SYNC_ADMIN_KEY` 값을 넣어야 합니다.
+`X-Local-Approval` 헤더에 값을 넣어야 합니다.
+
+- 로컬 모드: `/api/status`의 `approval_token`
+- 서버 공개 모드(`ALLOW_REMOTE_ACCESS=true`): `SYNC_ADMIN_KEY` 값. 이 키가 설정되지 않았다면 동기화가 비활성화되고(`sync_enabled: false`) 승인 토큰도 내려가지 않습니다.
 
 ```json
 {
@@ -52,5 +55,5 @@
 }
 ```
 
-오류 코드: `403` 승인 실패·정책 거절, `400` ECOS 요청 오류, `422` 입력 검증 실패, `503` Ollama 또는 내부 서비스 오류.
+오류 코드: `403` 승인 실패·정책 거절, `429` 요청 제한 초과 또는 인증 실패 잠금(`Retry-After: 60`), `400` ECOS 요청 오류, `422` 입력 검증 실패, `503` Ollama 또는 내부 서비스 오류.
 

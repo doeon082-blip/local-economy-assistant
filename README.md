@@ -67,7 +67,8 @@ ECOS 가져오기:  브라우저 ─► POST /api/data/sync(/batch) ─► ECOS 
 - 앱은 대화 이력을 파일이나 DB에 저장하지 않습니다. 대화는 현재 브라우저 탭의 메모리에만 있습니다.
 - ECOS는 사용자가 **ECOS 데이터 가져오기**를 누를 때만 요청하며, 동기화에는 통계 코드와 기간만 포함됩니다. API 키는 로그와 오류 메시지에서 가려집니다.
 - 통계 원자료와 동기화 이력은 `.local_data/ecos_statistics.sqlite3` SQLite DB에, 검색 임베딩은 `.local_data/vector_store/` Chroma DB에 즉시 저장되며 모두 Git에서 제외됩니다. Chroma 익명 사용 통계는 꺼 둡니다.
-- ECOS 동기화는 승인이 필요한 작업입니다. 서버가 발급한 승인 토큰(또는 `SYNC_ADMIN_KEY`)을 `X-Local-Approval` 헤더로 보내야 하며, 없거나 틀리면 거절합니다.
+- ECOS 동기화는 승인이 필요한 작업입니다. `X-Local-Approval` 헤더가 없거나 틀리면 거절하고, 서버 공개 모드에서는 `SYNC_ADMIN_KEY`가 없으면 동기화를 아예 비활성화합니다.
+- 요청 제한, 보안 헤더, 인증 실패 잠금 등 적용된 보안 장치와 그 이유는 [SECURITY.md](SECURITY.md)에 정리했습니다.
 
 ## 로컬에서 시작하기
 
@@ -121,6 +122,7 @@ ollama pull nomic-embed-text
 | [docs/configuration.md](docs/configuration.md) | ECOS 키, 주기별 기간 형식, 환경 변수 전체 표 |
 | [docs/api.md](docs/api.md) | HTTP API 명세, 스트리밍 응답 형식, 오류 코드 |
 | [docs/deployment.md](docs/deployment.md) | Docker Compose, Render, Netlify, GitHub Pages 배포 |
+| [SECURITY.md](SECURITY.md) | 위협 모델, 보안 장치와 이유, 배포 체크리스트, 취약점 신고 |
 
 ## 개발과 테스트
 
@@ -130,7 +132,7 @@ uv sync
 uv run python -m unittest discover -s tests -v
 ```
 
-테스트 25개가 다음을 검증합니다. 외부 서비스(ECOS, Ollama)는 모의 객체로 대체되어 네트워크 없이 실행됩니다.
+테스트 35개가 다음을 검증합니다. 외부 서비스(ECOS, Ollama)는 모의 객체로 대체되어 네트워크 없이 실행됩니다.
 
 | 파일 | 대상 |
 | --- | --- |
@@ -139,8 +141,9 @@ uv run python -m unittest discover -s tests -v
 | `backend/tests/test_ecos_and_vector_store.py` | ECOS 페이지네이션·키 가림, SQLite·증분 임베딩 |
 | `backend/tests/test_assistant_and_db_queries.py` | 프롬프트 구성, SQLite 조회 |
 | `backend/tests/test_ollama_client.py` | Ollama 일반·스트리밍 응답과 오류 처리 |
+| `backend/tests/test_security.py` | 토큰 비교, 요청 제한, 인증 실패 잠금, 보안 헤더, 입력 검증 |
 
-GitHub Actions는 `main` 푸시와 PR마다 백엔드 테스트 → 프론트엔드 빌드 → Docker 이미지 빌드 검증을 실행하고(`ci.yml`), `frontend/` 변경 시 GitHub Pages에 배포합니다(`pages.yml`).
+GitHub Actions는 `main` 푸시와 PR마다 백엔드 테스트 → 프론트엔드 빌드 → Docker 이미지 빌드 검증을 실행하고(`ci.yml`), `frontend/` 변경 시 GitHub Pages에 배포하며(`pages.yml`), 비밀키·의존성 취약점 검사는 푸시와 매주 월요일에 실행합니다(`security.yml`).
 
 ## 프로젝트 구조
 
@@ -167,7 +170,10 @@ GitHub Actions는 `main` 푸시와 PR마다 백엔드 테스트 → 프론트엔
 │   └── package.json
 ├── scripts/                       # 실행 스크립트 (start / dev / frontend-dev)
 ├── docs/                          # 상세 문서 (설정·API·배포)
-├── .github/workflows/             # CI(ci.yml), Pages 배포(pages.yml)
+├── .github/
+│   ├── workflows/                 # ci.yml, pages.yml, security.yml
+│   └── dependabot.yml             # 의존성 자동 업데이트
+├── SECURITY.md                    # 보안 정책·장치·체크리스트
 ├── Dockerfile                     # Node + Python 멀티스테이지 빌드
 ├── docker-compose.yml             # 앱 + Ollama + 모델 초기화
 ├── render.yaml                    # Render 백엔드 배포

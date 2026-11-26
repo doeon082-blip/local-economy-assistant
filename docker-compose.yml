@@ -37,6 +37,7 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
       ECOS_API_KEY: ${ECOS_API_KEY:-}
       SYNC_ADMIN_KEY: ${SYNC_ADMIN_KEY:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
     volumes:
       - vector_data:/app/.local_data
@@ -44,6 +45,11 @@ services:
       ollama:
         condition: service_started
     restart: unless-stopped
+    # 컨테이너 권한 최소화: 모든 리눅스 capability 제거, 권한 상승 차단
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   ollama_data:

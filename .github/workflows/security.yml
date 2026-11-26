@@ -1,0 +1,60 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1" # 매주 월요일: 코드 변경이 없어도 새로 공개된 취약점을 감지
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: 비밀키 노출 검사 (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  python-audit:
+    name: Python 의존성 취약점 (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: 잠금 파일에서 운영 의존성 내보내기
+        working-directory: backend
+        run: uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
+      # 아래 4건은 chromadb "서버"(HTTP /api/v2/tenants/...)의 취약점입니다.
+      # 이 앱은 서버 없이 내장 PersistentClient만 쓰고 Chroma 포트를 열지 않아 영향이 없습니다.
+      # (SECURITY.md 참고) 그 외 새 취약점은 그대로 실패 처리됩니다.
+      - name: pip-audit
+        working-directory: backend
+        run: >
+          uvx pip-audit -r requirements.txt --no-deps --disable-pip
+          --ignore-vuln PYSEC-2026-311
+          --ignore-vuln PYSEC-2026-3813
+          --ignore-vuln PYSEC-2026-3814
+          --ignore-vuln PYSEC-2026-3815
+
+  npm-audit:
+    name: 프론트엔드 의존성 취약점 (npm audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm audit --audit-level=high

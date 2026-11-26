@@ -12,7 +12,7 @@ Docker, Render, Netlify, GitHub Pages 배포 방법입니다. [← README로](..
    Copy-Item .env.example .env
    ```
 
-   외부 공개 서버에 배포할 때는 `.env`에 `SYNC_ADMIN_KEY`를 설정해 임의 사용자가 서버의 ECOS 동기화를 호출하지 못하도록 보호하는 것을 권장합니다.
+   외부 공개 서버에서는 `.env`에 `SYNC_ADMIN_KEY`를 **반드시** 설정하세요. 없으면 보안을 위해 ECOS 동기화가 비활성화됩니다. 보안 체크리스트는 [SECURITY.md](../SECURITY.md)를 참고하세요.
 
 2. Docker Compose로 앱 + Ollama를 함께 실행합니다.
 

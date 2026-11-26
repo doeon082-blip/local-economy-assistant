@@ -46,7 +46,8 @@ ECOS_API_KEY=발급받은_개인_API_키
 | `ALLOW_REMOTE_OLLAMA` | `false` | `true`면 원격 Ollama 사용 허용 |
 | `HOST` | `127.0.0.1` | 바인딩 주소. 컨테이너에서는 `0.0.0.0` |
 | `PORT` | `8765` | 서버 포트 |
-| `SYNC_ADMIN_KEY` | (비어 있음) | 설정하면 ECOS 동기화에 이 키가 필요하고 화면에 승인 토큰을 노출하지 않음 |
+| `SYNC_ADMIN_KEY` | (비어 있음) | ECOS 동기화 관리자 키. **`ALLOW_REMOTE_ACCESS=true`일 때는 필수**이며, 없으면 동기화가 비활성화됨 |
+| `RATE_LIMIT_PER_MINUTE` | `60` | 클라이언트(IP)당 분당 채팅·동기화 POST 허용 횟수. `0`이면 제한 없음 |
 | `CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173` | 별도 프론트엔드 도메인을 쉼표로 구분해 지정 |
 | `VITE_API_BASE` | (비어 있음) | 프론트엔드 **빌드** 시 백엔드 주소. 정적 호스팅에 올릴 때 사용 |
 

@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import secrets
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,12 +21,13 @@ from .config import (
     cors_origins,
     ecos_api_key,
     model_name,
+    rate_limit_per_minute,
     sync_admin_key,
 )
 from .data.ecos_client import EcosError, MAX_SYNC_LIMIT, fetch_many, fetch_series
 from .data.sqlite_store import StatisticsDatabase
 from .data.vector_store import VectorStore
-from .security_policy import ActionRequest, SecurityPolicy, require_allowed
+from .security_policy import ActionRequest, RateLimiter, SecurityPolicy, require_allowed, tokens_match
 from .services.economic_assistant import answer, answer_stream
 from .services.ollama_client import OllamaError, status as ollama_status
 
@@ -39,6 +41,22 @@ policy = SecurityPolicy(
     allow_data_changes=True,
 )
 MAX_HISTORY_CHARS = 24000
+MAX_AUTH_FAILURES_PER_MINUTE = 10
+RATE_LIMITED_PREFIXES = ("/api/chat", "/api/data/sync")
+_request_limiter = RateLimiter()
+_auth_failure_limiter = RateLimiter()
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
 frontend_dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
@@ -75,9 +93,18 @@ if (frontend_dist / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="frontend-assets")
 
 
+class ChatMessage(BaseModel):
+    # system/tool 역할은 받지 않습니다: 클라이언트가 시스템 지시문을 주입하지 못하게 합니다.
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=8000)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
-    history: list[dict[str, str]] = Field(default_factory=list, max_length=12)
+    history: list[ChatMessage] = Field(default_factory=list, max_length=12)
+
+    def history_dicts(self) -> list[dict[str, str]]:
+        return [message.model_dump() for message in self.history]
 
 
 class SyncRequest(BaseModel):
@@ -93,15 +120,39 @@ class BatchSyncRequest(BaseModel):
     items: list[SyncRequest] = Field(min_length=1, max_length=12)
 
 
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
 def _check_sync_approval(request: Request) -> None:
-    token = request.headers.get("X-Local-Approval", "")
-    expected_token = sync_admin_key() or approval_token
-    approved = bool(token) and secrets.compare_digest(token, expected_token)
+    admin_key = sync_admin_key()
+    if allow_remote_access() and not admin_key:
+        # 외부 공개 모드에서 관리자 키가 없으면 누구나 동기화할 수 있으므로 기능 자체를 닫습니다.
+        raise PermissionError("외부 공개 모드에서는 SYNC_ADMIN_KEY를 설정해야 ECOS 동기화를 사용할 수 있습니다.")
+    client = _client_key(request)
+    if _auth_failure_limiter.is_blocked(client, MAX_AUTH_FAILURES_PER_MINUTE):
+        raise HTTPException(status_code=429, detail="인증 실패가 너무 많습니다. 잠시 후 다시 시도하세요.", headers={"Retry-After": "60"})
+    approved = tokens_match(request.headers.get("X-Local-Approval", ""), admin_key or approval_token)
+    if not approved:
+        _auth_failure_limiter.record(client)
     require_allowed(
         ActionRequest("ecos_sync", sends_data_outside=True, changes_data=True),
         policy,
         trusted_user_approved=approved,
     )
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    limit = rate_limit_per_minute()
+    if limit and request.method == "POST" and request.url.path.startswith(RATE_LIMITED_PREFIXES):
+        if not _request_limiter.allow(_client_key(request), limit):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "요청이 너무 많습니다. 잠시 후 다시 시도하세요."},
+                headers={"Retry-After": "60"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -112,6 +163,16 @@ async def loopback_only(request: Request, call_next):
     if client not in {"127.0.0.1", "::1", "localhost", "testclient"}:
         return JSONResponse(status_code=403, content={"detail": "이 앱은 이 기기에서만 사용할 수 있습니다."})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 @app.get("/healthz")
@@ -130,8 +191,10 @@ def status():
         "sync_runs": db_stats["sync_runs"],
         "max_sync_limit": MAX_SYNC_LIMIT,
         "ecos_key_configured": bool(ecos_api_key()),
-        "sync_requires_key": bool(admin_key),
-        "approval_token": None if admin_key else approval_token,
+        # 외부 공개 모드에서는 키 입력이 필수이고, 승인 토큰은 절대 내려주지 않습니다.
+        "sync_requires_key": bool(admin_key) or allow_remote_access(),
+        "sync_enabled": bool(admin_key) or not allow_remote_access(),
+        "approval_token": None if (admin_key or allow_remote_access()) else approval_token,
     }
     return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
@@ -146,7 +209,7 @@ def _validated_question(request: ChatRequest) -> str:
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="질문을 입력해 주세요.")
-    if sum(len(item.get("content", "")) for item in request.history) > MAX_HISTORY_CHARS:
+    if sum(len(item.content) for item in request.history) > MAX_HISTORY_CHARS:
         raise HTTPException(status_code=422, detail="대화 이력이 너무 깁니다. 새 대화를 시작해 주세요.")
     require_allowed(ActionRequest("local_ollama_chat"), policy)
     return question
@@ -166,7 +229,7 @@ def _chat_errors():
 def chat(request: ChatRequest):
     with _chat_errors():
         question = _validated_question(request)
-        return answer(question, request.history, get_store(), get_db())
+        return answer(question, request.history_dicts(), get_store(), get_db())
 
 
 def _stream_ndjson(citations: list[dict[str, str]], token_iter):
@@ -183,7 +246,7 @@ def _stream_ndjson(citations: list[dict[str, str]], token_iter):
 def chat_stream_endpoint(request: ChatRequest):
     with _chat_errors():
         question = _validated_question(request)
-        citations, token_iter = answer_stream(question, request.history, get_store(), get_db())
+        citations, token_iter = answer_stream(question, request.history_dicts(), get_store(), get_db())
 
     return StreamingResponse(
         _stream_ndjson(citations, token_iter),
