@@ -39,7 +39,7 @@ jobs:
           # Settings > Secrets and variables > Actions > Variables 에 HTTPS 백엔드 주소를 등록하세요.
           VITE_API_BASE: ${{ vars.VITE_API_BASE }}
       - run: cp dist/index.html dist/404.html
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: frontend/dist
 
