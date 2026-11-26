@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: local-economy-assistant
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: ALLOW_REMOTE_ACCESS
+        value: "true"
+      - key: ALLOW_REMOTE_OLLAMA
+        value: "true"
+      - key: OLLAMA_MODEL
+        value: qwen3.5:4b
+      - key: OLLAMA_URL
+        sync: false
+      - key: ECOS_API_KEY
+        sync: false
+      - key: SYNC_ADMIN_KEY
+        generateValue: true

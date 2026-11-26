@@ -1,0 +1,50 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - ollama pull "$OLLAMA_MODEL" && ollama pull nomic-embed-text
+    restart: "no"
+
+  app:
+    build: .
+    ports:
+      - "${PORT:-8765}:${PORT:-8765}"
+    environment:
+      ALLOW_REMOTE_ACCESS: "true"
+      ALLOW_REMOTE_OLLAMA: "true"
+      HOST: "0.0.0.0"
+      PORT: ${PORT:-8765}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
+      SYNC_ADMIN_KEY: ${SYNC_ADMIN_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    volumes:
+      - vector_data:/app/.local_data
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  vector_data:
