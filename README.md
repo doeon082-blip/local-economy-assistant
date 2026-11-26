@@ -122,6 +122,7 @@ ollama pull nomic-embed-text
 | [docs/configuration.md](docs/configuration.md) | ECOS 키, 주기별 기간 형식, 환경 변수 전체 표 |
 | [docs/api.md](docs/api.md) | HTTP API 명세, 스트리밍 응답 형식, 오류 코드 |
 | [docs/deployment.md](docs/deployment.md) | Docker Compose, Render, Netlify, GitHub Pages 배포 |
+| [docs/class-assistant.md](docs/class-assistant.md) | **수업 도우미**(이 브랜치): 자료 Q&A·퀴즈·요약·코드 도우미 구조와 확장 방법 |
 | [SECURITY.md](SECURITY.md) | 위협 모델, 보안 장치와 이유, 배포 체크리스트, 취약점 신고 |
 
 ## 개발과 테스트
@@ -152,6 +153,7 @@ GitHub Actions는 `main` 푸시와 PR마다 백엔드 테스트 → 프론트엔
 ├── backend/                       # Python 백엔드 (FastAPI)
 │   ├── pyproject.toml             #   의존성·패키지 설정 (uv)
 │   ├── uv.lock
+│   ├── src/class_assistant/       #   수업 도우미 백엔드 (docs/class-assistant.md)
 │   ├── src/economy_assistant/
 │   │   ├── __init__.py            #   실행기 (--dev 지원)
 │   │   ├── api.py                 #   FastAPI 서버, 정적 프론트엔드 서빙
@@ -166,6 +168,7 @@ GitHub Actions는 `main` 푸시와 PR마다 백엔드 테스트 → 프론트엔
 │   │       └── economic_assistant.py  # 하이브리드 검색·프롬프트 구성
 │   └── tests/                     #   단위·API 통합 테스트
 ├── frontend/                      # React + Vite 화면
+├── frontend_streamlit/            # 수업 도우미 임시 화면 (Streamlit, 곧 교체 예정)
 │   ├── src/
 │   └── package.json
 ├── scripts/                       # 실행 스크립트 (start / dev / frontend-dev)

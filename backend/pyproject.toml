@@ -9,15 +9,24 @@ requires-python = ">=3.13"
 dependencies = [
     "chromadb>=1.0,<2",
     "fastapi>=0.115,<1",
+    "pypdf>=7.1.1",
+    "python-multipart>=0.0.34",
+    "python-pptx>=1.0.2",
     "uvicorn[standard]>=0.34,<1",
 ]
 
 [project.scripts]
 economy-assistant = "economy_assistant:main"
+class-assistant = "class_assistant:main"
+
+[project.optional-dependencies]
+ui = [
+    "streamlit>=1.67.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.13.10,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "economy_assistant"
+module-name = ["economy_assistant", "class_assistant"]
