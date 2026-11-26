@@ -1,17 +1,24 @@
 [project]
-name = "test-project"
+name = "local-economy-assistant"
 version = "0.1.0"
-description = "Add your description here"
+description = "한국은행 ECOS와 로컬 Ollama를 사용하는 경제 대화 앱"
 readme = "README.md"
 authors = [
     { name = "귀염뽀작도언이", email = "doeon082@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "chromadb>=1.0,<2",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+]
 
 [project.scripts]
-test-project = "test_project:main"
+economy-assistant = "economy_assistant:main"
 
 [build-system]
 requires = ["uv_build>=0.13.10,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "economy_assistant"
