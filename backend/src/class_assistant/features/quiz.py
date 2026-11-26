@@ -1,6 +1,8 @@
 """Quiz / flashcard generation grounded in a source passage, grading, and wrong-answer-first review."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import random
 import re
 from typing import Any
 
@@ -9,6 +11,20 @@ from .base import Feature, register_feature
 from .util import parse_json_object
 
 MAX_ITEMS_PER_REQUEST = 10
+MIN_CHUNK_CHARS = 40          # prefer substantial passages; fall back to any chunk for short notes
+GENERATION_WORKERS = 4        # chunks are generated in parallel (Ollama queues if it runs 1 slot)
+DUPLICATE_RETRIES = 2         # extra attempts per question when the model repeats itself
+MAX_AVOID_LISTED = 8          # how many earlier questions to show the model per call
+# Each call gets a different "angle" so one passage can yield several genuinely different questions.
+ANGLES = (
+    "핵심 용어나 개념의 정의를 묻는",
+    "두 개념의 차이를 비교하는",
+    "구체적인 수치·이름·예시를 묻는",
+    "원인과 결과를 묻는",
+    "옳지 않은 것을 고르는",
+    "실제 상황에 적용하는",
+)
+DUPLICATE_SIMILARITY = 0.7    # character-bigram Jaccard at/above this counts as "the same question"
 
 _MCQ_SYSTEM = """당신은 시험 문제 출제자다. 주어진 [자료] 구절만 근거로 객관식 문제 1개를 만든다.
 반드시 아래 JSON 형식으로만 답한다.
@@ -32,6 +48,26 @@ def _normalize(text: str) -> str:
     return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE).lower()
 
 
+# Small models sometimes copy our generation instructions into the question text, e.g.
+# "(단, 구체적인 수치는 사용하지 말라)". Such questions are rejected instead of shown to learners.
+_LEAKED_INSTRUCTION = re.compile(r"(출제\s*관점|만들어라|사용하지\s*말|쓰지\s*말|하지\s*말라|묻는\s*문제를)")
+
+
+def _bigrams(text: str) -> set[str]:
+    norm = _normalize(text)
+    return {norm[i:i + 2] for i in range(len(norm) - 1)} or {norm}
+
+
+def _is_duplicate(question: str, existing: list[str]) -> bool:
+    """True if ``question`` is (nearly) identical to any existing one. Whitespace/punctuation are ignored."""
+    mine = _bigrams(question)
+    for other in existing:
+        theirs = _bigrams(other)
+        if len(mine & theirs) / len(mine | theirs) >= DUPLICATE_SIMILARITY:
+            return True
+    return False
+
+
 def public_item(item: dict[str, Any]) -> dict[str, Any]:
     """What the learner may see before answering (no answer/explanation/source)."""
     return {k: item[k] for k in ("id", "doc_id", "kind", "topic", "question", "choices")}
@@ -45,37 +81,117 @@ class QuizFeature(Feature):
 
     # --- generation ------------------------------------------------------
     def generate(self, doc_ids: list[int] | None = None, count: int = 5, kind: str = "mcq") -> dict[str, Any]:
+        """Create ``count`` new questions spread over the material without repeating earlier ones.
+
+        * Chunks that have produced the fewest questions so far go first (random among ties), so
+          coverage stays even across the file(s) and repeated requests keep finding fresh material.
+        * When there are more questions than chunks, a chunk is asked about several times; each call
+          is told which questions already exist for it.
+        * Near-duplicates (vs. stored questions and this batch) are rejected and retried.
+        """
         if kind not in {"mcq", "short"}:
             raise ValueError("kind는 'mcq' 또는 'short'여야 합니다.")
         count = max(1, min(count, MAX_ITEMS_PER_REQUEST))
-        chunks = self.services.db.sample_chunks(doc_ids, count)
-        if not chunks:
+        db = self.services.db
+        pool = db.list_chunks(doc_ids, min_chars=MIN_CHUNK_CHARS) or db.list_chunks(doc_ids, min_chars=1)
+        if not pool:
             raise NoMaterialError("문제를 만들 자료가 없습니다. 먼저 수업 자료를 업로드하세요.")
 
-        new_items = []
-        for chunk in chunks:
-            item = self._generate_one(chunk, kind)
-            if item:
-                new_items.append(item)
-        ids = self.services.db.add_quiz_items(new_items)
-        stored = [self.services.db.get_quiz_item(i) for i in ids]
-        return {
-            "items": [public_item(i) for i in stored if i],
-            "requested": count,
-            "skipped": len(chunks) - len(new_items),
-        }
+        known = db.question_texts(doc_ids)
+        per_chunk_known: dict[int, list[str]] = {}
+        for chunk_id, question in db.chunk_questions([c["id"] for c in pool]):
+            per_chunk_known.setdefault(chunk_id, []).append(question)
 
-    def _generate_one(self, chunk: dict[str, Any], kind: str) -> dict[str, Any] | None:
+        random.shuffle(pool)  # random order among chunks with equal coverage (sort below is stable)
+        pool.sort(key=lambda c: len(per_chunk_known.get(c["id"], [])))
+        slots: dict[int, int] = {}
+        for index in range(count):
+            chunk = pool[index % len(pool)]
+            slots[chunk["id"]] = slots.get(chunk["id"], 0) + 1
+        by_id = {c["id"]: c for c in pool}
+
+        def work(chunk_id: int) -> tuple[list[dict[str, Any]], int, int]:
+            return self._generate_for_chunk(by_id[chunk_id], slots[chunk_id], kind, known, per_chunk_known.get(chunk_id, []))
+
+        with ThreadPoolExecutor(max_workers=min(len(slots), GENERATION_WORKERS)) as executor:
+            outcomes = list(executor.map(work, slots))  # first LLMError propagates -> HTTP 503
+
+        accepted: list[dict[str, Any]] = []
+        invalid = duplicates = 0
+        seen = list(known)
+        for items, bad, repeated in outcomes:
+            invalid += bad
+            duplicates += repeated
+            for item in items:  # chunks ran in parallel, so cross-chunk duplicates are caught here
+                if _is_duplicate(item["question"], seen):
+                    duplicates += 1
+                    continue
+                seen.append(item["question"])
+                accepted.append(item)
+        random.shuffle(accepted)  # do not group the questions by source chunk
+
+        ids = db.add_quiz_items(accepted)
+        stored = [db.get_quiz_item(i) for i in ids]
+        items = [public_item(i) for i in stored if i]
+        notice = None
+        if len(items) < count:
+            notice = (
+                f"요청한 {count}개 중 {len(items)}개만 만들었습니다. 자료에서 겹치지 않는 새 문제를 더 만들기 어렵거나 "
+                "모델 응답이 형식에 맞지 않았습니다. 자료를 더 올리면 더 많이 만들 수 있습니다."
+            )
+        return {"items": items, "requested": count, "skipped": invalid, "duplicates": duplicates, "notice": notice}
+
+    def _generate_for_chunk(
+        self, chunk: dict[str, Any], slots: int, kind: str, known: list[str], chunk_known: list[str]
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        """Make up to ``slots`` distinct questions from one chunk.
+
+        Returns ``(items, invalid_reply_count, rejected_duplicate_count)``. Every attempt uses a
+        different angle; once a question cannot be made distinct after retries the chunk is treated
+        as exhausted and we stop, instead of burning more model calls on a passage with nothing new.
+        """
+        made: list[dict[str, Any]] = []
+        avoid = list(chunk_known)
+        angles = random.sample(ANGLES, len(ANGLES))
+        invalid = repeated = calls = 0
+        for _ in range(slots):
+            produced = False
+            for _attempt in range(1 + DUPLICATE_RETRIES):
+                item = self._generate_one(chunk, kind, avoid, angles[calls % len(angles)])
+                calls += 1
+                if item is None:
+                    invalid += 1
+                    break
+                if _is_duplicate(item["question"], [*known, *(m["question"] for m in made)]):
+                    repeated += 1
+                    avoid.append(item["question"])  # tell the model what to stay away from, then retry
+                    continue
+                made.append(item)
+                avoid.append(item["question"])
+                produced = True
+                break
+            if not produced:
+                break  # exhausted (or the model is not answering in the expected format)
+        return made, invalid, repeated
+
+    def _generate_one(
+        self, chunk: dict[str, Any], kind: str, avoid: list[str] | None = None, angle: str | None = None
+    ) -> dict[str, Any] | None:
         system = _MCQ_SYSTEM if kind == "mcq" else _SHORT_SYSTEM
+        prompt = f"[자료]\n<untrusted_data>\n{chunk['text']}\n</untrusted_data>"
+        if angle:
+            prompt += f"\n\n[출제 관점] 이번에는 {angle} 문제를 만들어라. 이 지시 문장은 문제 본문이나 보기에 쓰지 않는다."
+        if avoid:
+            listed = "\n".join(f"- {q[:100]}" for q in avoid[-MAX_AVOID_LISTED:])
+            prompt += f"\n\n[이미 출제된 문제] 아래 문제와 같거나 비슷한 문제는 만들지 말고, 자료의 다른 내용을 물어라.\n{listed}"
         reply = self.services.llm.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": f"[자료]\n<untrusted_data>\n{chunk['text']}\n</untrusted_data>"}],
-            json_mode=True,
+            [{"role": "system", "content": system}, {"role": "user", "content": prompt}], json_mode=True
         )
         data = parse_json_object(reply)
         if not data:
             return None
         question = str(data.get("question", "")).strip()
-        if not question:
+        if not question or _LEAKED_INSTRUCTION.search(question):
             return None
         base = {
             "doc_id": chunk["doc_id"],

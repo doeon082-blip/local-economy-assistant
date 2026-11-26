@@ -6,10 +6,11 @@ Security defaults mirror economy_assistant: loopback-only. When ``ALLOW_REMOTE_A
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import json
 import os
 import secrets
+import threading
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
@@ -75,16 +76,34 @@ def _http_errors():
 
 def create_app(services: Services | None = None) -> FastAPI:
     """App factory. Pass ``services`` in tests; production builds them lazily on first use."""
-    app = FastAPI(title="수업 도우미 API", docs_url=None, redoc_url=None)
-    app.state.services = services
-    app.state.features = None
+    build_lock = threading.Lock()
 
     def ctx() -> tuple[Services, dict[str, Feature]]:
-        if app.state.services is None:
-            app.state.services = build_default_services()
-        if app.state.features is None:
-            app.state.features = build_features(app.state.services)
+        with build_lock:  # the warm-up thread and the first request must not build services twice
+            if app.state.services is None:
+                app.state.services = build_default_services()
+            if app.state.features is None:
+                app.state.features = build_features(app.state.services)
         return app.state.services, app.state.features
+
+    def warm_up() -> None:
+        try:
+            svc, _ = ctx()
+            warm = getattr(svc.llm, "warmup", None)
+            if callable(warm):
+                warm()
+        except Exception:
+            pass  # warm-up is an optimisation; real requests report errors properly
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if services is None:  # production only: tests inject fakes and must not touch Ollama
+            threading.Thread(target=warm_up, name="warmup", daemon=True).start()
+        yield
+
+    app = FastAPI(title="수업 도우미 API", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app.state.services = services
+    app.state.features = None
 
     app.add_middleware(
         CORSMiddleware,

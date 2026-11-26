@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,23 @@ from class_assistant.ingest import ExtractionError, Segment, chunk_segments, chu
 from class_assistant.llm.base import LLMError
 from class_assistant.services import Library, Services, UploadError
 from class_assistant.store import Database
+
+
+# Clearly different questions: near-identical ones would (correctly) be rejected as duplicates.
+QUESTION_POOL = [
+    "HTTP 기본 포트 번호는 무엇인가?",
+    "GET 요청이 서버의 상태에 미치는 영향은?",
+    "404 응답 코드가 알려 주는 상황은?",
+    "새 자원을 만들 때 쓰는 메서드는 어느 것인가?",
+    "서버 내부 오류를 의미하는 숫자는?",
+    "암호화된 웹 통신은 어떤 규약을 쓰는가?",
+    "요청과 응답 구조에서 클라이언트의 역할은?",
+    "DELETE 메서드를 호출하면 일어나는 일은?",
+    "브라우저가 주소창에 입력된 도메인을 찾는 방법은?",
+    "상태 코드 200이 뜻하는 결과는?",
+    "쿠키가 저장되는 위치는 어디인가?",
+    "캐시를 사용하는 가장 큰 이유는?",
+]
 
 
 def _tokens(text: str) -> set[str]:
@@ -59,6 +77,9 @@ class FakeLLM:
         self.short = {"topic": "HTTP", "question": "웹 요청 규약의 이름은?", "answer": "HTTP", "explanation": "자료 참고"}
         self.judge_correct = True
         self.fail = False
+        self.vary = True                     # give every generated question different text
+        self._counter = itertools.count()
+        self.sequence: list[str] = []        # when set, questions are popped from here (scripted replies)
         self.summary = {"summary": "요약문", "glossary": [{"term": "HTTP", "definition": "규약"}], "questions": ["HTTP란?"]}
 
     def chat(self, messages, *, json_mode=False):
@@ -67,14 +88,22 @@ class FakeLLM:
             raise LLMError("down")
         system = messages[0]["content"]
         if "객관식" in system:
-            return json.dumps(self.mcq, ensure_ascii=False)
+            return json.dumps(self._question(self.mcq), ensure_ascii=False)
         if "단답형 문제" in system:
-            return json.dumps(self.short, ensure_ascii=False)
+            return json.dumps(self._question(self.short), ensure_ascii=False)
         if "채점자" in system:
             return json.dumps({"correct": self.judge_correct})
         if "핵심을 한국어 글머리표" in system:
             return "- 부분 요약"
         return json.dumps(self.summary, ensure_ascii=False)
+
+    def _question(self, template: dict) -> dict:
+        data = dict(template)
+        if self.sequence:
+            data["question"] = self.sequence.pop(0)
+        elif self.vary:
+            data["question"] = QUESTION_POOL[next(self._counter) % len(QUESTION_POOL)]
+        return data
 
     def stream(self, messages):
         self.calls.append(messages)
@@ -214,6 +243,85 @@ class QATests(Base):
         self.assertEqual(meta["level"], 1)
 
 
+class QuizDistributionTests(Base):
+    """Balanced, non-repeating question generation."""
+
+    def _chunk_usage(self) -> dict[int, int]:
+        usage: dict[int, int] = {}
+        for chunk_id, _ in self.db.chunk_questions([c["id"] for c in self.db.list_chunks(None)]):
+            usage[chunk_id] = usage.get(chunk_id, 0) + 1
+        return usage
+
+    def _three_section_doc(self):
+        sections = [f"# 단원{n}\n{'내용 ' * 30}{n}번 단원의 설명이다." for n in range(3)]
+        return self.add("sections.md", "\n".join(sections))
+
+    def test_questions_spread_evenly_over_chunks(self) -> None:
+        self._three_section_doc()
+        quiz = self.features["quiz"]
+        quiz.generate(count=3)
+        self.assertEqual(sorted(self._chunk_usage().values()), [1, 1, 1])  # one per chunk, none doubled up
+        quiz.generate(count=3)
+        self.assertEqual(sorted(self._chunk_usage().values()), [2, 2, 2])  # least-covered chunks go first
+
+    def test_more_questions_than_chunks_reuses_chunks_without_repeating(self) -> None:
+        self.add()  # a single chunk
+        result = self.features["quiz"].generate(count=4)
+        questions = [i["question"] for i in result["items"]]
+        self.assertEqual(len(questions), 4)
+        self.assertEqual(len(set(questions)), 4)
+        self.assertIsNone(result["notice"])
+        # later calls for the same chunk are told what was already asked
+        prompts = [c[1]["content"] for c in self.llm.calls if "이미 출제된 문제" in c[1]["content"]]
+        self.assertTrue(prompts)
+
+    def test_model_that_repeats_itself_never_stores_duplicates(self) -> None:
+        self.add()
+        self.llm.vary = False  # the model keeps returning the very same question
+        quiz = self.features["quiz"]
+        first = quiz.generate(count=3)
+        self.assertEqual(len(first["items"]), 1)
+        self.assertIn("1개만 만들었습니다", first["notice"])
+        again = quiz.generate(count=3)
+        self.assertEqual(again["items"], [])
+        self.assertEqual(self.db.stats()["quiz_items"], 1)
+
+    def test_exhausted_chunk_stops_early_and_each_call_uses_a_new_angle(self) -> None:
+        self.add()
+        self.llm.vary = False  # nothing new can ever be produced from this passage
+        result = self.features["quiz"].generate(count=8)
+        quiz_calls = [c for c in self.llm.calls if "객관식" in c[0]["content"]]
+        # 1 accepted + (1 + retries) rejected, then the chunk is given up on: not 8 x 3 calls
+        self.assertEqual(len(quiz_calls), 1 + 1 + 2)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["duplicates"], 3)
+        angles = [c[1]["content"].split("[출제 관점] 이번에는 ")[1].split(" 문제를")[0] for c in quiz_calls]
+        self.assertEqual(len(set(angles[:4])), 4)  # a different angle every call
+
+    def test_duplicate_is_retried_with_avoid_list_and_recovers(self) -> None:
+        self.add()
+        quiz = self.features["quiz"]
+        self.llm.sequence = ["HTTP 기본 포트 번호는 무엇인가?"]
+        quiz.generate(count=1)
+        self.llm.sequence = ["HTTP 기본 포트 번호는 무엇인가?", "서버 내부 오류를 의미하는 숫자는?"]
+        result = quiz.generate(count=1)
+        self.assertEqual([i["question"] for i in result["items"]], ["서버 내부 오류를 의미하는 숫자는?"])
+        self.assertIn("HTTP 기본 포트 번호는 무엇인가?", self.llm.calls[-1][1]["content"])
+
+    def test_same_question_from_different_chunks_is_stored_once(self) -> None:
+        self._three_section_doc()
+        self.llm.vary = False
+        result = self.features["quiz"].generate(count=3)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["duplicates"], 2)
+
+    def test_duplicate_detection_ignores_spacing_and_punctuation(self) -> None:
+        from class_assistant.features.quiz import _is_duplicate
+
+        self.assertTrue(_is_duplicate("HTTP 기본 포트는 무엇인가?", ["http기본포트는 무엇인가"]))
+        self.assertFalse(_is_duplicate("404 응답이 뜻하는 것은?", ["HTTP 기본 포트는 무엇인가?"]))
+
+
 class QuizTests(Base):
     def test_generate_mcq_hides_answer_and_stores_source(self) -> None:
         self.add()
@@ -234,6 +342,14 @@ class QuizTests(Base):
     def test_short_chunks_from_heading_split_notes_still_generate(self) -> None:
         self.add("short.md", "# A\n포트는 80\n# B\n상태코드 404")  # chunks well under any minimum length
         self.assertEqual(len(self.features["quiz"].generate(count=1)["items"]), 1)
+
+    def test_question_that_copies_our_instructions_is_rejected(self) -> None:
+        self.add()
+        self.llm.sequence = ["다음 중 기본키의 특징은? (단, 구체적인 수치나 예시는 사용하지 말라)"]
+        result = self.features["quiz"].generate(count=1)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self.db.stats()["quiz_items"], 0)
 
     def test_generate_without_material_raises(self) -> None:
         with self.assertRaises(NoMaterialError):

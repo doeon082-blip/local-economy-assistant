@@ -127,22 +127,16 @@ class Database:
     def get_chunks(self, doc_id: int) -> list[dict[str, Any]]:
         return self._all("SELECT * FROM chunks WHERE doc_id = ? ORDER BY ordinal", (doc_id,))
 
-    def sample_chunks(self, doc_ids: list[int] | None, limit: int, min_chars: int = 40) -> list[dict[str, Any]]:
-        """Random chunks for question generation. Prefers substantial chunks but falls back to any,
-        because heading-split notes (markdown/slides) often produce short ones."""
-
-        def query(minimum: int) -> list[dict[str, Any]]:
-            where, params = ["length(c.text) >= ?"], [minimum]
-            if doc_ids:
-                where.append(f"c.doc_id IN ({_placeholders(doc_ids)})")
-                params += doc_ids
-            sql = (
-                "SELECT c.*, d.filename FROM chunks c JOIN documents d ON d.id = c.doc_id "
-                f"WHERE {' AND '.join(where)} ORDER BY RANDOM() LIMIT ?"
-            )
-            return self._all(sql, [*params, limit])
-
-        return query(min_chars) or query(1)
+    def list_chunks(self, doc_ids: list[int] | None, min_chars: int = 1) -> list[dict[str, Any]]:
+        where, params = ["length(c.text) >= ?"], [min_chars]
+        if doc_ids:
+            where.append(f"c.doc_id IN ({_placeholders(doc_ids)})")
+            params += doc_ids
+        return self._all(
+            "SELECT c.*, d.filename FROM chunks c JOIN documents d ON d.id = c.doc_id "
+            f"WHERE {' AND '.join(where)} ORDER BY c.doc_id, c.ordinal",
+            params,
+        )
 
     # --- quiz ------------------------------------------------------------
     def add_quiz_items(self, items: list[dict[str, Any]]) -> list[int]:
@@ -160,6 +154,23 @@ class Database:
                 )
                 ids.append(int(cursor.lastrowid))
         return ids
+
+    def question_texts(self, doc_ids: list[int] | None = None, limit: int = 500) -> list[str]:
+        """Most recent stored questions (used to avoid asking the same thing twice)."""
+        where, params = "", []
+        if doc_ids:
+            where, params = f"WHERE doc_id IN ({_placeholders(doc_ids)})", list(doc_ids)
+        rows = self._all(f"SELECT question FROM quiz_items {where} ORDER BY id DESC LIMIT ?", [*params, limit])
+        return [r["question"] for r in rows]
+
+    def chunk_questions(self, chunk_ids: list[int]) -> list[tuple[int, str]]:
+        if not chunk_ids:
+            return []
+        rows = self._all(
+            f"SELECT chunk_id, question FROM quiz_items WHERE chunk_id IN ({_placeholders(chunk_ids)}) ORDER BY id",
+            chunk_ids,
+        )
+        return [(r["chunk_id"], r["question"]) for r in rows]
 
     def get_quiz_item(self, quiz_id: int) -> dict[str, Any] | None:
         row = self._one("SELECT * FROM quiz_items WHERE id = ?", (quiz_id,))

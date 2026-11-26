@@ -42,6 +42,7 @@ class OllamaProvider:
             "messages": messages,
             "stream": stream,
             "think": False,
+            "keep_alive": config.ollama_keep_alive(),
             "options": {
                 "num_ctx": config.ollama_num_ctx(),
                 "num_predict": config.ollama_num_predict(),
@@ -101,6 +102,17 @@ class OllamaProvider:
         if not isinstance(vectors, list) or len(vectors) != len(texts):
             raise LLMError("임베딩 응답 형식이 올바르지 않습니다.")
         return vectors
+
+    def warmup(self) -> None:
+        """Load both models into memory ahead of the first user request. Best effort."""
+        try:
+            self._http.post(
+                self.base_url + "/api/chat",
+                json={**self._payload([{"role": "user", "content": "ok"}], stream=False), "options": {"num_predict": 1}},
+            ).raise_for_status()
+            self.embed(["warmup"])
+        except Exception:
+            pass
 
     def health(self) -> dict[str, object]:
         try:

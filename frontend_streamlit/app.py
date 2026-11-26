@@ -147,8 +147,8 @@ with tab_quiz:
             try:
                 result = call("POST", "/api/quiz/generate", json={"doc_ids": scope or None, "count": int(count), "kind": kind})
                 st.session_state["quiz"] = {"items": result["items"], "results": {}}
-                if result["skipped"]:
-                    st.info(f"모델이 형식에 맞지 않게 답해 {result['skipped']}개는 건너뛰었습니다.")
+                if result.get("notice"):
+                    st.info(result["notice"])
             except ApiError as exc:
                 show_error(exc)
     if col_d.button("틀린 문제 복습"):

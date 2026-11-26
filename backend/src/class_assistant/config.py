@@ -93,6 +93,12 @@ def ollama_num_ctx() -> int:
     return _env_int("OLLAMA_NUM_CTX", 4096, 1024, 32768)
 
 
+def ollama_keep_alive() -> str:
+    """How long Ollama keeps the model in memory after a call. Ollama's default (5 min) makes the
+    first request after a short break pay a full model reload, which is the main source of latency."""
+    return _env("OLLAMA_KEEP_ALIVE", "30m")
+
+
 def ollama_num_predict() -> int:
     return _env_int("OLLAMA_NUM_PREDICT", 1024, 128, 8192)
 
