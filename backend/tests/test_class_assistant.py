@@ -80,13 +80,19 @@ class FakeLLM:
         self.vary = True                     # give every generated question different text
         self._counter = itertools.count()
         self.sequence: list[str] = []        # when set, questions are popped from here (scripted replies)
+        self.verify_mode = "agree"           # "agree" | "disagree" | "unavailable"
+        self.verify_script: list[str] = []   # per-call verifier modes, consumed in order
+        self.verify_models: list = []        # the `model` argument of every verifier call
         self.summary = {"summary": "요약문", "glossary": [{"term": "HTTP", "definition": "규약"}], "questions": ["HTTP란?"]}
 
-    def chat(self, messages, *, json_mode=False):
+    def chat(self, messages, *, json_mode=False, model=None):
         self.calls.append(messages)
+        system = messages[0]["content"]
+        if system.startswith("[검증]"):
+            self.verify_models.append(model)
+            return self._verify_reply(system)
         if self.fail:
             raise LLMError("down")
-        system = messages[0]["content"]
         if "객관식" in system:
             return json.dumps(self._question(self.mcq), ensure_ascii=False)
         if "단답형 문제" in system:
@@ -96,6 +102,15 @@ class FakeLLM:
         if "핵심을 한국어 글머리표" in system:
             return "- 부분 요약"
         return json.dumps(self.summary, ensure_ascii=False)
+
+    def _verify_reply(self, system: str) -> str:
+        mode = self.verify_script.pop(0) if self.verify_script else self.verify_mode
+        if mode == "unavailable":
+            raise LLMError("verifier down")
+        if "answer_index" in system:
+            right = self.mcq["answer_index"]
+            return json.dumps({"answer_index": right if mode == "agree" else (right + 1) % 4})
+        return json.dumps({"answer": self.short["answer"] if mode == "agree" else "전혀 다른 답"}, ensure_ascii=False)
 
     def _question(self, template: dict) -> dict:
         data = dict(template)
@@ -306,7 +321,8 @@ class QuizDistributionTests(Base):
         self.llm.sequence = ["HTTP 기본 포트 번호는 무엇인가?", "서버 내부 오류를 의미하는 숫자는?"]
         result = quiz.generate(count=1)
         self.assertEqual([i["question"] for i in result["items"]], ["서버 내부 오류를 의미하는 숫자는?"])
-        self.assertIn("HTTP 기본 포트 번호는 무엇인가?", self.llm.calls[-1][1]["content"])
+        generation_calls = [c for c in self.llm.calls if "객관식" in c[0]["content"]]
+        self.assertIn("HTTP 기본 포트 번호는 무엇인가?", generation_calls[-1][1]["content"])
 
     def test_same_question_from_different_chunks_is_stored_once(self) -> None:
         self._three_section_doc()
@@ -320,6 +336,68 @@ class QuizDistributionTests(Base):
 
         self.assertTrue(_is_duplicate("HTTP 기본 포트는 무엇인가?", ["http기본포트는 무엇인가"]))
         self.assertFalse(_is_duplicate("404 응답이 뜻하는 것은?", ["HTTP 기본 포트는 무엇인가?"]))
+
+
+class QuizVerificationTests(Base):
+    """A second blind pass drops questions whose answer cannot be reproduced from the passage."""
+
+    def test_agreeing_verifier_keeps_questions(self) -> None:
+        self.add()
+        result = self.features["quiz"].generate(count=2)
+        self.assertEqual((len(result["items"]), result["rejected_unverified"], result["unchecked"]), (2, 0, 0))
+        self.assertEqual(len(self.llm.verify_models), 2)  # one check per accepted question
+
+    def test_disagreeing_verifier_drops_the_question(self) -> None:
+        self.add()
+        self.llm.verify_mode = "disagree"
+        result = self.features["quiz"].generate(count=2)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(self.db.stats()["quiz_items"], 0)
+        self.assertGreaterEqual(result["rejected_unverified"], 1)
+        self.assertIn("만들었습니다", result["notice"])
+
+    def test_rejected_question_is_retried_and_can_recover(self) -> None:
+        self.add()
+        self.llm.verify_script = ["disagree", "agree"]
+        result = self.features["quiz"].generate(count=1)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["rejected_unverified"], 1)
+
+    def test_short_answer_questions_are_verified_too(self) -> None:
+        self.add()
+        self.llm.verify_mode = "disagree"
+        self.assertEqual(self.features["quiz"].generate(count=1, kind="short")["items"], [])
+        self.llm.verify_mode = "agree"
+        self.assertEqual(len(self.features["quiz"].generate(count=1, kind="short")["items"]), 1)
+
+    def test_unavailable_verifier_keeps_questions_but_flags_them(self) -> None:
+        self.add()
+        self.llm.verify_mode = "unavailable"
+        result = self.features["quiz"].generate(count=1)
+        self.assertEqual((len(result["items"]), result["unchecked"]), (1, 1))
+        self.assertIn("검증 없이", result["notice"])
+
+    def test_verifier_is_blind_to_the_intended_answer(self) -> None:
+        self.add()
+        self.features["quiz"].generate(count=1)
+        verify_call = next(c for c in self.llm.calls if c[0]["content"].startswith("[검증]"))
+        prompt = verify_call[0]["content"] + verify_call[1]["content"]
+        self.assertNotIn("자료 참고", prompt)          # the explanation written by the generator
+        self.assertNotIn("정답", verify_call[1]["content"])
+        self.assertIn("0. 21", verify_call[1]["content"])  # but it does see the choices
+
+    def test_separate_verifier_model_is_used_only_for_verification(self) -> None:
+        self.add()
+        with patch.dict(os.environ, {"QUIZ_VERIFY_MODEL": "big-model:12b"}):
+            self.features["quiz"].generate(count=1)
+        self.assertEqual(set(self.llm.verify_models), {"big-model:12b"})
+
+    def test_verification_can_be_switched_off(self) -> None:
+        self.add()
+        with patch.dict(os.environ, {"QUIZ_VERIFY": "false"}):
+            result = self.features["quiz"].generate(count=2)
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(self.llm.verify_models, [])
 
 
 class QuizTests(Base):

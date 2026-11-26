@@ -93,6 +93,16 @@ def ollama_num_ctx() -> int:
     return _env_int("OLLAMA_NUM_CTX", 4096, 1024, 32768)
 
 
+def quiz_verify_enabled() -> bool:
+    """Blind-solve every generated question from its source passage and drop disagreements."""
+    return _env("QUIZ_VERIFY", "true").lower() in _TRUE
+
+
+def verify_model() -> str | None:
+    """Model used for verification. Empty = same model as generation (weaker: shares its blind spots)."""
+    return _env("QUIZ_VERIFY_MODEL") or None
+
+
 def ollama_keep_alive() -> str:
     """How long Ollama keeps the model in memory after a call. Ollama's default (5 min) makes the
     first request after a short break pay a full model reload, which is the main source of latency."""

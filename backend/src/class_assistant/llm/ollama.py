@@ -36,9 +36,11 @@ class OllamaProvider:
     def embed_model(self) -> str:
         return self._embed_model or config.embed_model()
 
-    def _payload(self, messages: list[Message], *, stream: bool, json_mode: bool = False) -> dict[str, object]:
+    def _payload(
+        self, messages: list[Message], *, stream: bool, json_mode: bool = False, model: str | None = None
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "stream": stream,
             "think": False,
@@ -53,10 +55,10 @@ class OllamaProvider:
             payload["format"] = "json"
         return payload
 
-    def chat(self, messages: list[Message], *, json_mode: bool = False) -> str:
+    def chat(self, messages: list[Message], *, json_mode: bool = False, model: str | None = None) -> str:
         try:
             response = self._http.post(
-                self.base_url + "/api/chat", json=self._payload(messages, stream=False, json_mode=json_mode)
+                self.base_url + "/api/chat", json=self._payload(messages, stream=False, json_mode=json_mode, model=model)
             )
             response.raise_for_status()
             content = response.json().get("message", {}).get("content")
@@ -111,6 +113,14 @@ class OllamaProvider:
                 json={**self._payload([{"role": "user", "content": "ok"}], stream=False), "options": {"num_predict": 1}},
             ).raise_for_status()
             self.embed(["warmup"])
+            if config.quiz_verify_enabled() and config.verify_model():  # the verifier is a different model
+                self._http.post(
+                    self.base_url + "/api/chat",
+                    json={
+                        **self._payload([{"role": "user", "content": "ok"}], stream=False, model=config.verify_model()),
+                        "options": {"num_predict": 1},
+                    },
+                ).raise_for_status()
         except Exception:
             pass
 
